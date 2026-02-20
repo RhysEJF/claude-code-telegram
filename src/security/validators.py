@@ -132,21 +132,36 @@ class SecurityValidator:
     ]
 
     def __init__(
-        self, approved_directory: Path, disable_security_patterns: bool = False
+        self,
+        approved_directory: Path,
+        disable_security_patterns: bool = False,
+        read_only_directories: Optional[List[Path]] = None,
     ):
         """Initialize validator with approved directory."""
         self.approved_directory = approved_directory.resolve()
         self.disable_security_patterns = disable_security_patterns
+        self.read_only_directories = [
+            d.resolve() for d in (read_only_directories or [])
+        ]
         logger.info(
             "Security validator initialized",
             approved_directory=str(self.approved_directory),
             disable_security_patterns=self.disable_security_patterns,
+            read_only_directories=[str(d) for d in self.read_only_directories],
         )
 
     def validate_path(
-        self, user_path: str, current_dir: Optional[Path] = None
+        self,
+        user_path: str,
+        current_dir: Optional[Path] = None,
+        is_read: bool = False,
     ) -> Tuple[bool, Optional[Path], Optional[str]]:
         """Validate and resolve user-provided path.
+
+        Args:
+            user_path: The path to validate.
+            current_dir: Current working directory for relative path resolution.
+            is_read: If True, also allows paths within read_only_directories.
 
         Returns:
             Tuple of (is_valid, resolved_path, error_message)
@@ -187,21 +202,33 @@ class SecurityValidator:
             target = target.resolve()
 
             # Ensure target is within approved directory
-            if not self._is_within_directory(target, self.approved_directory):
-                logger.warning(
-                    "Path traversal attempt detected",
-                    requested_path=user_path,
+            if self._is_within_directory(target, self.approved_directory):
+                logger.debug(
+                    "Path validation successful",
+                    original_path=user_path,
                     resolved_path=str(target),
-                    approved_directory=str(self.approved_directory),
                 )
-                return False, None, "Access denied: path outside approved directory"
+                return True, target, None
 
-            logger.debug(
-                "Path validation successful",
-                original_path=user_path,
+            # For read operations, also check read-only directories
+            if is_read and self.read_only_directories:
+                for ro_dir in self.read_only_directories:
+                    if self._is_within_directory(target, ro_dir):
+                        logger.debug(
+                            "Read-only path validation successful",
+                            original_path=user_path,
+                            resolved_path=str(target),
+                            read_only_directory=str(ro_dir),
+                        )
+                        return True, target, None
+
+            logger.warning(
+                "Path traversal attempt detected",
+                requested_path=user_path,
                 resolved_path=str(target),
+                approved_directory=str(self.approved_directory),
             )
-            return True, target, None
+            return False, None, "Access denied: path outside approved directory"
 
         except Exception as e:
             logger.error("Path validation error", path=user_path, error=str(e))

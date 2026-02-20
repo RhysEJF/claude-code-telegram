@@ -218,10 +218,13 @@ class ToolMonitor:
             if not file_path:
                 return False, "File path required"
 
+            # Read-only tools get access to read_only_directories
+            is_read_op = tool_name in ["read_file", "Read"]
+
             # Validate path security
             if self.security_validator:
                 valid, resolved_path, error = self.security_validator.validate_path(
-                    file_path, working_directory
+                    file_path, working_directory, is_read=is_read_op
                 )
 
                 if not valid:

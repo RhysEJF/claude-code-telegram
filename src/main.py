@@ -130,6 +130,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     security_validator = SecurityValidator(
         config.approved_directory,
         disable_security_patterns=config.disable_security_patterns,
+        read_only_directories=config.read_only_directories,
     )
     rate_limiter = RateLimiter(config)
 

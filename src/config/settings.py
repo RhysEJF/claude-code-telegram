@@ -49,6 +49,15 @@ class Settings(BaseSettings):
         None, description="Secret for auth tokens"
     )
 
+    # Read-only access to additional directories
+    read_only_directories: Optional[List[Path]] = Field(
+        None,
+        description=(
+            "Additional directories Claude can read from but not write to "
+            "(comma-separated absolute paths)"
+        ),
+    )
+
     # Security relaxation (for trusted environments)
     disable_security_patterns: bool = Field(
         False,
@@ -232,16 +241,42 @@ class Settings(BaseSettings):
             return [int(uid) for uid in v]
         return v  # type: ignore[no-any-return]
 
-    @field_validator("claude_allowed_tools", mode="before")
+    @field_validator("claude_allowed_tools", "sandbox_excluded_commands", mode="before")
     @classmethod
-    def parse_claude_allowed_tools(cls, v: Any) -> Optional[List[str]]:
-        """Parse comma-separated tool names."""
+    def parse_comma_separated_strings(cls, v: Any) -> Optional[List[str]]:
+        """Parse comma-separated string lists."""
         if v is None:
             return None
         if isinstance(v, str):
-            return [tool.strip() for tool in v.split(",") if tool.strip()]
+            return [item.strip() for item in v.split(",") if item.strip()]
         if isinstance(v, list):
-            return [str(tool) for tool in v]
+            return [str(item) for item in v]
+        return v  # type: ignore[no-any-return]
+
+    @field_validator("read_only_directories", mode="before")
+    @classmethod
+    def parse_read_only_directories(cls, v: Any) -> Optional[List[Path]]:
+        """Parse comma-separated directory paths and validate they exist."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            paths = []
+            for p in v.split(","):
+                p = p.strip()
+                if not p:
+                    continue
+                path = Path(p).expanduser().resolve()
+                if not path.exists():
+                    raise ValueError(f"Read-only directory does not exist: {path}")
+                if not path.is_dir():
+                    raise ValueError(f"Read-only path is not a directory: {path}")
+                paths.append(path)
+            return paths if paths else None
+        if isinstance(v, list):
+            return [Path(p).expanduser().resolve() for p in v]
         return v  # type: ignore[no-any-return]
 
     @field_validator("approved_directory")

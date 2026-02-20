@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     Message,
     ProcessError,
     ResultMessage,
+    SystemMessage,
     ToolUseBlock,
     UserMessage,
 )
@@ -38,6 +39,40 @@ from .exceptions import (
 )
 
 logger = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: the claude_agent_sdk v0.1.38 parse_message() crashes on
+# message types it doesn't recognize (e.g. "rate_limit_event").  The CLI
+# emits these as informational events and handles retry internally — the SDK
+# just needs to not crash.  We wrap the original parser to gracefully convert
+# unknown types into SystemMessage objects so the iteration can continue.
+# ---------------------------------------------------------------------------
+def _patch_sdk_message_parser() -> None:
+    """Patch SDK message parser to handle unknown message types gracefully."""
+    from claude_agent_sdk._internal import message_parser as _mp
+    from claude_agent_sdk._internal import client as _client
+
+    _original_parse = _mp.parse_message
+
+    def _tolerant_parse(data: dict) -> Message:
+        try:
+            return _original_parse(data)
+        except Exception:
+            msg_type = data.get("type", "unknown")
+            logger.debug(
+                "SDK parser skipping unrecognized message type",
+                message_type=msg_type,
+            )
+            # Return a SystemMessage so the iteration continues
+            return SystemMessage(subtype=msg_type, data=data)
+
+    _mp.parse_message = _tolerant_parse
+    # The client module also imports parse_message at the top level
+    _client.parse_message = _tolerant_parse
+
+
+_patch_sdk_message_parser()
 
 
 def find_claude_cli(claude_cli_path: Optional[str] = None) -> Optional[str]:
@@ -179,10 +214,7 @@ class ClaudeSDKManager:
                     "autoAllowBashIfSandboxed": True,
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
-                system_prompt=(
-                    f"All file operations must stay within {working_directory}. "
-                    "Use relative paths."
-                ),
+                system_prompt=self._build_system_prompt(working_directory),
             )
 
             # Pass MCP server configuration if enabled
@@ -323,8 +355,9 @@ class ClaudeSDKManager:
             raise ClaudeParsingError(f"Failed to decode Claude response: {str(e)}")
 
         except ClaudeSDKError as e:
-            logger.error("Claude SDK error", error=str(e))
-            raise ClaudeProcessError(f"Claude SDK error: {str(e)}")
+            error_str = str(e)
+            logger.error("Claude SDK error", error=error_str)
+            raise ClaudeProcessError(f"Claude SDK error: {error_str}")
 
         except Exception as e:
             # Handle ExceptionGroup from TaskGroup operations (Python 3.11+)
@@ -453,6 +486,24 @@ class ClaudeSDKManager:
                             )
 
         return tools_used
+
+    def _build_system_prompt(self, working_directory: Path) -> str:
+        """Build the system prompt with directory access rules."""
+        lines = [
+            f"Your primary working directory is {working_directory}.",
+            "All write operations (Write, Edit, Bash) must stay within this directory.",
+        ]
+
+        ro_dirs = getattr(self.config, "read_only_directories", None)
+        if ro_dirs:
+            dirs_str = ", ".join(str(d) for d in ro_dirs)
+            lines.append(
+                f"You also have READ-ONLY access to: {dirs_str}. "
+                "You may use the Read and Glob tools to read files in those directories, "
+                "but you must not write to or modify them."
+            )
+
+        return " ".join(lines)
 
     def _load_mcp_config(self, config_path: Path) -> Dict[str, Any]:
         """Load MCP server configuration from a JSON file.
